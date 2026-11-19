@@ -805,6 +805,10 @@ func (c *Client) Monitor() error {
 				return err
 			}
 
+			if err := c.ProcessWaitBox(); err != nil {
+				return err
+			}
+
 			lastLearnAt = time.Now()
 
 		case evA, ok := <-eventCh:
@@ -838,7 +842,8 @@ func (c *Client) Monitor() error {
 	}
 }
 
-// RunOnce processes all mails in the ham, spam and scan mailbox once.
+// RunOnce processes all mails in the ham, spam, scan and, if configured, wait
+// mailbox once.
 func (c *Client) RunOnce() error {
 	err := c.ProcessHam()
 	if err != nil {
@@ -850,7 +855,12 @@ func (c *Client) RunOnce() error {
 		return fmt.Errorf("learning spam failed: %w", err)
 	}
 
-	return c.ProcessScanBox()
+	err = c.ProcessScanBox()
+	if err != nil {
+		return err
+	}
+
+	return c.ProcessWaitBox()
 }
 
 // Stop closes the connection the IMAP-Server.

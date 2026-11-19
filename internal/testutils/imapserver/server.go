@@ -2,6 +2,7 @@ package imapserver
 
 import (
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -60,9 +61,17 @@ func StartServer(t *testing.T) *Server {
 		InsecureAuth: true,
 	})
 
+	// Listen synchronously: with ListenAndServe in the goroutine, a test that
+	// ends quickly closes the server before it listens, leaking a listener
+	// that blocks the fixed port for the next test.
+	ln, err := net.Listen("tcp", srv.ListenAddr)
+	if err != nil {
+		t.Fatalf("listening on %s failed: %s", srv.ListenAddr, err)
+	}
+
 	t.Cleanup(func() { _ = isrv.Close() })
 	go func() {
-		err := isrv.ListenAndServe(srv.ListenAddr)
+		err := isrv.Serve(ln)
 		srv.ch <- err
 		close(srv.ch)
 	}()

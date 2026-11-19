@@ -721,3 +721,55 @@ func TestProcessWaitBox_DryRunMovesNothing(t *testing.T) {
 	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
 	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
 }
+
+// uploadDueToWaitBox puts a mail into the wait mailbox that is already older
+// than the wait duration.
+func uploadDueToWaitBox(t *testing.T, clt IMAPClient, srv *imapserver.Server, clock *fakeClock) {
+	t.Helper()
+
+	err := clt.Upload(
+		mail.TestHamMailPath(t), srv.WaitMailbox,
+		clock.Now().Add(-testWaitDuration-time.Hour),
+	)
+	assert.NoError(t, err)
+}
+
+func TestRunOnce_ProcessesWaitBox(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	uploadDueToWaitBox(t, clt.clt, srv, clock)
+
+	assert.NoError(t, clt.RunOnce())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+}
+
+func TestMonitor_TimerProcessesWaitBox(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	clt.learnInterval = 100 * time.Millisecond
+
+	runErrChan := make(chan error, 1)
+	go func() {
+		runErrChan <- clt.Monitor()
+	}()
+
+	// the wait mailbox does not generate scan mailbox events, only the
+	// periodic timer can pick the mail up
+	clt2 := newTestClient(t, srv)
+	uploadDueToWaitBox(t, clt2.clt, srv, clock)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for clt.cntProcessedMails.Load() < 1 {
+		if time.Now().After(deadline) {
+			_ = clt.Stop()
+			t.Fatal("wait mailbox was not processed by the periodic timer")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt2.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt2.clt, srv.WaitMailbox))
+
+	assert.NoError(t, clt.Stop())
+	assert.NoError(t, <-runErrChan)
+}
