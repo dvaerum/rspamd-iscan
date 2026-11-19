@@ -73,6 +73,10 @@ func connectTestIMAPClient(t *testing.T, srv *imapserver.Server) *imapclt.Client
 
 	t.Logf("connection to imap server established successfully")
 
+	// A connection left open blocks the shutdown of the in-memory server and
+	// with it the start of the next test's server on the same port.
+	t.Cleanup(func() { _ = imapClt.Close() })
+
 	return imapClt
 }
 
@@ -292,4 +296,67 @@ func TestNewClient_NoWaitMailboxNoCheck(t *testing.T) {
 	_, err := NewClient(testClientCfg(t, clt, srv))
 	assert.NoError(t, err)
 	assert.Equal(t, 0, len(clt.verified))
+}
+
+// fakeClock is an adjustable clock for [Client.now].
+type fakeClock struct{ t time.Time }
+
+func (f *fakeClock) Now() time.Time          { return f.t }
+func (f *fakeClock) Advance(d time.Duration) { f.t = f.t.Add(d) }
+
+const (
+	testUnsureThreshold = 5
+	testWaitDuration    = 6 * time.Hour
+)
+
+// newWaitTestClient returns a client with the wait band enabled
+// (UnsureThreshold 5, SpamThreshold 10, WaitDuration 6h) and a fake clock.
+func newWaitTestClient(t *testing.T) (*imapserver.Server, *Client, *fakeClock) {
+	srv := imapserver.StartServer(t)
+	imapClt := connectTestIMAPClient(t, srv)
+
+	cfg := testClientCfg(t, imapClt, srv)
+	cfg.WaitMailbox = srv.WaitMailbox
+	cfg.UnsureThreshold = testUnsureThreshold
+	cfg.WaitDuration = testWaitDuration.String()
+
+	clt, err := NewClient(cfg)
+	assert.NoError(t, err)
+	t.Cleanup(func() { _ = clt.Stop() })
+
+	clock := &fakeClock{t: time.Now().Truncate(time.Second)}
+	clt.now = clock.Now
+
+	return srv, clt, clock
+}
+
+func TestNewClient_DefaultClockIsTimeNow(t *testing.T) {
+	_, clt := startServerClient(t)
+
+	before := time.Now()
+	got := clt.now()
+	if got.Before(before) || time.Since(got) > time.Minute {
+		t.Errorf("default clock returned %s, expected approx. now", got)
+	}
+}
+
+func TestNewClient_WaitConfigApplied(t *testing.T) {
+	srv, clt, _ := newWaitTestClient(t)
+
+	assert.Equal(t, srv.WaitMailbox, clt.waitMailbox)
+	assert.Equal(t, float32(testUnsureThreshold), clt.unsureThreshold)
+	assert.Equal(t, testWaitDuration, clt.waitDuration)
+}
+
+func TestNewClient_WaitDurationDefault(t *testing.T) {
+	srv := imapserver.StartServer(t)
+	imapClt := connectTestIMAPClient(t, srv)
+
+	cfg := testClientCfg(t, imapClt, srv)
+	cfg.WaitMailbox = srv.WaitMailbox
+	cfg.UnsureThreshold = testUnsureThreshold
+
+	clt, err := NewClient(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, defaultWaitDuration, clt.waitDuration)
 }

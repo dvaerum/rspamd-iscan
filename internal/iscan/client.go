@@ -48,6 +48,15 @@ type Client struct {
 	undetectedMailbox string
 	spamTreshold      float32
 
+	// waitMailbox enables the unsure/wait band when non-empty.
+	waitMailbox     string
+	unsureThreshold float32
+	waitDuration    time.Duration
+
+	// now is the clock used for the wait-band INTERNALDATE and age checks;
+	// tests replace it.
+	now func() time.Time
+
 	tempDir       string
 	keepTempFiles bool
 
@@ -84,6 +93,11 @@ func NewClient(cfg *Config) (*Client, error) {
 		}
 	}
 
+	waitDuration, err := cfg.waitDuration()
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Client{
 		clt:                     cfg.IMAPClient,
 		logger:                  log.EnsureLoggerInstance(cfg.Logger),
@@ -94,6 +108,10 @@ func NewClient(cfg *Config) (*Client, error) {
 		undetectedMailbox:       cfg.UndetectedMailboxName,
 		rspamc:                  cfg.Rspamc,
 		spamTreshold:            cfg.SpamTreshold,
+		waitMailbox:             cfg.WaitMailbox,
+		unsureThreshold:         cfg.UnsureThreshold,
+		waitDuration:            waitDuration,
+		now:                     time.Now,
 		learnInterval:           30 * time.Minute,
 		backupMailbox:           cfg.BackupMailbox,
 		tempDir:                 cfg.TempDir,
