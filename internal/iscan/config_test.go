@@ -1,6 +1,7 @@
 package iscan
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -57,6 +58,35 @@ func TestConfigValidate_Wait(t *testing.T) {
 			"unsure threshold above spam threshold",
 			func(c *Config) { c.WaitMailbox = "Wait"; c.UnsureThreshold = 11 },
 			"UnsureThreshold",
+		},
+		{
+			"unsure threshold NaN",
+			func(c *Config) { c.WaitMailbox = "Wait"; c.UnsureThreshold = float32(math.NaN()) },
+			"UnsureThreshold",
+		},
+		{
+			"spam threshold NaN",
+			func(c *Config) {
+				c.WaitMailbox = "Wait"
+				c.UnsureThreshold = 5
+				c.SpamTreshold = float32(math.NaN())
+			},
+			"SpamThreshold",
+		},
+		{
+			"same as inbox mailbox, INBOX in other case",
+			func(c *Config) { c.InboxMailbox = "INBOX"; c.WaitMailbox = "Inbox"; c.UnsureThreshold = 5 },
+			"InboxMailbox",
+		},
+		{
+			"same as inbox mailbox, configured in other case",
+			func(c *Config) { c.InboxMailbox = "inbox"; c.WaitMailbox = "INBOX"; c.UnsureThreshold = 5 },
+			"InboxMailbox",
+		},
+		{
+			"other mailbox names stay case-sensitive",
+			func(c *Config) { c.WaitMailbox = "backup"; c.UnsureThreshold = 5 },
+			"",
 		},
 		{
 			"duration unparsable",

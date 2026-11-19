@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"math"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/fho/rspamd-iscan/internal/imapclt"
@@ -81,6 +83,15 @@ func (c *Config) validateWait() error {
 		return nil
 	}
 
+	// NaN passes every ordered comparison below. Rejecting it for
+	// SpamTreshold is done here, not in validate(), to leave the checks of
+	// the disabled path as they are.
+	if math.IsNaN(float64(c.UnsureThreshold)) {
+		return errors.New("UnsureThreshold must be a number")
+	}
+	if math.IsNaN(float64(c.SpamTreshold)) {
+		return errors.New("SpamThreshold must be a number when WaitMailbox is set")
+	}
 	if c.UnsureThreshold <= 0 {
 		return errors.New("UnsureThreshold must be >0 when WaitMailbox is set")
 	}
@@ -101,12 +112,18 @@ func (c *Config) validateWait() error {
 		{"UndetectedMailbox", c.UndetectedMailboxName},
 	}
 	for _, o := range others {
-		if c.WaitMailbox == o.mailbox {
+		if sameMailbox(c.WaitMailbox, o.mailbox) {
 			return fmt.Errorf("WaitMailbox and %s must differ", o.name)
 		}
 	}
 
 	return nil
+}
+
+// sameMailbox reports whether a and b name the same mailbox. IMAP defines the
+// name INBOX as case-insensitive, all other names are case-sensitive.
+func sameMailbox(a, b string) bool {
+	return a == b || (strings.EqualFold(a, "INBOX") && strings.EqualFold(b, "INBOX"))
 }
 
 func (c *Config) validate() error {
