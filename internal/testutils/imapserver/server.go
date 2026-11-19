@@ -30,7 +30,7 @@ func StartServer(t *testing.T) *Server {
 	srv := Server{
 		UserName:          "user",
 		UserPasswd:        "none",
-		ListenAddr:        "localhost:10143",
+		ListenAddr:        "127.0.0.1:0",
 		ch:                make(chan error, 2),
 		InboxMailBox:      "INBOX",
 		ScanMailbox:       "unscanned",
@@ -61,15 +61,21 @@ func StartServer(t *testing.T) *Server {
 		InsecureAuth: true,
 	})
 
-	// Listen synchronously: with ListenAndServe in the goroutine, a test that
-	// ends quickly closes the server before it listens, leaking a listener
-	// that blocks the fixed port for the next test.
+	// Port 0 gives every test its own free port, so tests in parallel
+	// packages cannot collide; ListenAddr is rewritten to the chosen address.
 	ln, err := net.Listen("tcp", srv.ListenAddr)
 	if err != nil {
 		t.Fatalf("listening on %s failed: %s", srv.ListenAddr, err)
 	}
+	srv.ListenAddr = ln.Addr().String()
+	srv.srv = isrv
 
-	t.Cleanup(func() { _ = isrv.Close() })
+	// Close the listener ourselves: if Close runs before Serve starts,
+	// go-imap's Serve returns without closing it and the listener leaks.
+	t.Cleanup(func() {
+		_ = isrv.Close()
+		_ = ln.Close()
+	})
 	go func() {
 		err := isrv.Serve(ln)
 		srv.ch <- err
