@@ -27,6 +27,14 @@ type Config struct {
 	LogIMAPData             bool
 	MarkLearnedAsSpamAsRead bool
 	LogLevel                string
+	// WaitMailbox enables the unsure/wait band when set: mails with a score
+	// in [UnsureThreshold, SpamThreshold) are held there for WaitDuration
+	// and scanned again afterwards.
+	WaitMailbox     string
+	UnsureThreshold float32
+	// WaitDuration is parsed with time.ParseDuration, go-toml has no
+	// duration type.
+	WaitDuration string
 }
 
 // New returns an new config initialized with default values
@@ -72,6 +80,11 @@ func (c *Config) String() string {
 	printKv("Undetected Mailbox", c.UndetectedMailbox)
 	printKv("Backup Mailbox", c.BackupMailbox)
 	printKv("Mark Learned Spam as Read", c.MarkLearnedAsSpamAsRead)
+	if c.WaitMailbox != "" {
+		printKv("Wait Mailbox", c.WaitMailbox)
+		printKv("Unsure Threshold", c.UnsureThreshold)
+		printKv("Wait Duration", c.WaitDuration)
+	}
 
 	printKv("Temporary Directory", c.TempDir)
 	printKv("Keep Temporary Files", c.KeepTempFiles)
@@ -84,6 +97,10 @@ func (c *Config) String() string {
 	fmt.Fprintf(&sb, "others are moved to %q.\n", c.InboxMailbox)
 	if c.UndetectedMailbox != "" {
 		fmt.Fprintf(&sb, "Mails in %q are learned as Spam and moved to %q.\n", c.UndetectedMailbox, c.SpamMailbox)
+	}
+	if c.WaitMailbox != "" {
+		fmt.Fprintf(&sb, "Mails with a spam score of >=%f and <%f are moved to %q and scanned again after %s.\n",
+			c.UnsureThreshold, c.SpamThreshold, c.WaitMailbox, c.WaitDuration)
 	}
 	fmt.Fprintf(&sb, "Mails in %q are learned as Ham and moved to %q.\n", c.HamMailbox, c.InboxMailbox)
 

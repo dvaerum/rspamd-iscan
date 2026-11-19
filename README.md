@@ -100,6 +100,18 @@ LogLevel                = "info"
 LogIMAPData             = false
 # Mark mails in UndetectedMailbox as read when moving them to SpamMailbox.
 MarkLearnedAsSpamAsRead = true
+# Optional unsure/wait band, disabled when WaitMailbox is empty or unset.
+# Mails with a score >= UnsureThreshold and < SpamThreshold are moved to
+# WaitMailbox (which must already exist) instead of InboxMailbox. After
+# WaitDuration they are scanned again: mails with a score >= SpamThreshold are
+# then moved to SpamMailbox, all others to InboxMailbox.
+# WaitMailbox must differ from all other mailboxes.
+#WaitMailbox             = "Wait"
+# Required when WaitMailbox is set: 0 < UnsureThreshold < SpamThreshold
+#UnsureThreshold         = 5.0
+# Optional, how long mails are held in WaitMailbox, a Go duration like "90m" or
+# "6h", default: "6h"
+#WaitDuration            = "6h"
 ```
 
 ### Credentials Directory

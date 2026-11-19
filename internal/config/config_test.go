@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fho/rspamd-iscan/internal/testutils/assert"
@@ -78,4 +79,46 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, cfg.TempDir, os.TempDir())
 	assert.Equal(t, cfg.MarkLearnedAsSpamAsRead, true)
 	assert.Equal(t, cfg.LogLevel, "info")
+
+	// The wait band is off by default. WaitDuration stays empty, so a
+	// WaitDuration without WaitMailbox can be detected, iscan applies the
+	// 6h default when the feature is enabled.
+	assert.Equal(t, cfg.WaitMailbox, "")
+	assert.Equal(t, cfg.UnsureThreshold, float32(0))
+	assert.Equal(t, cfg.WaitDuration, "")
+}
+
+func TestFromFile_WaitOptions(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "cfg.toml")
+	assert.NoError(t, os.WriteFile(f, []byte(`
+WaitMailbox     = "Wait"
+UnsureThreshold = 4.5
+WaitDuration    = "90m"
+`), 0o600))
+
+	cfg, err := FromFile(f)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "Wait", cfg.WaitMailbox)
+	assert.Equal(t, float32(4.5), cfg.UnsureThreshold)
+	assert.Equal(t, "90m", cfg.WaitDuration)
+}
+
+func TestString_WaitOptions(t *testing.T) {
+	cfg := New()
+	// output is unchanged while the feature is off
+	if strings.Contains(cfg.String(), "Wait") {
+		t.Errorf("String() mentions the wait band while it is disabled:\n%s", cfg.String())
+	}
+
+	cfg.WaitMailbox = "Wait"
+	cfg.UnsureThreshold = 4.5
+	cfg.WaitDuration = "90m"
+	out := cfg.String()
+
+	for _, want := range []string{"Wait Mailbox", "Wait", "Unsure Threshold", "4.5", "Wait Duration", "90m"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("String() output does not contain %q:\n%s", want, out)
+		}
+	}
 }
