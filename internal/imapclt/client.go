@@ -97,6 +97,18 @@ func (c *Client) Connect() error {
 	return nil
 }
 
+// VerifyMailbox returns an error if mailbox does not exist on the server.
+// It uses STATUS, which does not select the mailbox and therefore does not
+// interfere with a mailbox selected for monitoring.
+func (c *Client) VerifyMailbox(mailbox string) error {
+	_, err := c.clt.Status(mailbox, &imap.StatusOptions{NumMessages: true}).Wait()
+	if err != nil {
+		return fmt.Errorf("verifying mailbox %q failed (mailboxes are not created automatically): %w", mailbox, err)
+	}
+
+	return nil
+}
+
 func (c *Client) Close() error {
 	return c.clt.Close()
 }

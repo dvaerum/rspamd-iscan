@@ -19,6 +19,7 @@ type Server struct {
 	ScanMailbox       string
 	SpamMailbox       string
 	UndetectedMailbox string
+	WaitMailbox       string
 
 	srv *imapserver.Server
 	ch  chan error
@@ -36,6 +37,7 @@ func StartServer(t *testing.T) *Server {
 		HamMailbox:        "ham",
 		SpamMailbox:       "spam",
 		UndetectedMailbox: "undetected",
+		WaitMailbox:       "wait",
 	}
 
 	user := imapmemserver.NewUser(srv.UserName, srv.UserPasswd)
@@ -45,6 +47,7 @@ func StartServer(t *testing.T) *Server {
 	createMailbox(t, user, srv.ScanMailbox)
 	createMailbox(t, user, srv.SpamMailbox)
 	createMailbox(t, user, srv.UndetectedMailbox)
+	createMailbox(t, user, srv.WaitMailbox)
 
 	msrv := imapmemserver.New()
 	msrv.AddUser(user)

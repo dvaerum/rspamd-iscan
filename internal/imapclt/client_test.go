@@ -1,6 +1,7 @@
 package imapclt
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -42,4 +43,17 @@ func TestMonitorChanIsNonBlocking(t *testing.T) {
 	clt2.Close()
 
 	assert.NoError(t, stopFn())
+}
+
+func TestVerifyMailbox(t *testing.T) {
+	srv, clt := startServerClient(t)
+
+	assert.NoError(t, clt.VerifyMailbox(srv.InboxMailBox))
+	assert.NoError(t, clt.VerifyMailbox(srv.WaitMailbox))
+
+	err := clt.VerifyMailbox("does-not-exist")
+	assert.Error(t, err)
+	if !strings.Contains(err.Error(), "does-not-exist") {
+		t.Errorf("error %q does not name the mailbox", err)
+	}
 }

@@ -76,6 +76,14 @@ func NewClient(cfg *Config) (*Client, error) {
 		return nil, err
 	}
 
+	// Fail early with a clear error, instead of when the first mail should
+	// be moved to a mailbox that does not exist.
+	if cfg.WaitMailbox != "" {
+		if err := cfg.IMAPClient.VerifyMailbox(cfg.WaitMailbox); err != nil {
+			return nil, fmt.Errorf("WaitMailbox %q: %w", cfg.WaitMailbox, err)
+		}
+	}
+
 	c := &Client{
 		clt:                     cfg.IMAPClient,
 		logger:                  log.EnsureLoggerInstance(cfg.Logger),

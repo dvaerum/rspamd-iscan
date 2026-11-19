@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,16 @@ func testClientCfg(t *testing.T, clt IMAPClient, srv *imapserver.Server) *Config
 }
 
 func newTestClient(t *testing.T, srv *imapserver.Server) *Client {
+	imapClt := connectTestIMAPClient(t, srv)
+
+	clt, err := NewClient(testClientCfg(t, imapClt, srv))
+	assert.NoError(t, err)
+
+	t.Cleanup(func() { _ = clt.Stop() })
+	return clt
+}
+
+func connectTestIMAPClient(t *testing.T, srv *imapserver.Server) *imapclt.Client {
 	var err error
 
 	imapClt := imapclt.NewClient(&imapclt.Config{
@@ -62,11 +73,7 @@ func newTestClient(t *testing.T, srv *imapserver.Server) *Client {
 
 	t.Logf("connection to imap server established successfully")
 
-	clt, err := NewClient(testClientCfg(t, imapClt, srv))
-	assert.NoError(t, err)
-
-	t.Cleanup(func() { _ = clt.Stop() })
-	return clt
+	return imapClt
 }
 
 func TestProcessScanBox_DownloadAndScanFails(t *testing.T) {
@@ -223,4 +230,66 @@ func countMessagesInMailbox(t *testing.T, clt IMAPClient, mailbox string) int {
 		cnt++
 	}
 	return cnt
+}
+
+// verifyCountingClient counts VerifyMailbox calls. Calling any other method
+// panics because the embedded interface is nil.
+type verifyCountingClient struct {
+	IMAPClient
+	verified []string
+}
+
+func (c *verifyCountingClient) VerifyMailbox(mailbox string) error {
+	c.verified = append(c.verified, mailbox)
+	return nil
+}
+
+func TestNewClient_WaitMailboxMissing(t *testing.T) {
+	srv := imapserver.StartServer(t)
+	imapClt := connectTestIMAPClient(t, srv)
+
+	cfg := testClientCfg(t, imapClt, srv)
+	cfg.WaitMailbox = "no-such-wait-mailbox"
+	cfg.UnsureThreshold = 5
+
+	_, err := NewClient(cfg)
+	assert.Error(t, err)
+	if !strings.Contains(err.Error(), "no-such-wait-mailbox") {
+		t.Errorf("error %q does not name the wait mailbox", err)
+	}
+}
+
+func TestNewClient_WaitMailboxExists(t *testing.T) {
+	srv := imapserver.StartServer(t)
+	imapClt := connectTestIMAPClient(t, srv)
+
+	cfg := testClientCfg(t, imapClt, srv)
+	cfg.WaitMailbox = srv.WaitMailbox
+	cfg.UnsureThreshold = 5
+
+	_, err := NewClient(cfg)
+	assert.NoError(t, err)
+}
+
+func TestNewClient_WaitMailboxChecked(t *testing.T) {
+	srv := imapserver.StartServer(t)
+	clt := &verifyCountingClient{}
+
+	cfg := testClientCfg(t, clt, srv)
+	cfg.WaitMailbox = srv.WaitMailbox
+	cfg.UnsureThreshold = 5
+
+	_, err := NewClient(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(clt.verified))
+	assert.Equal(t, srv.WaitMailbox, clt.verified[0])
+}
+
+func TestNewClient_NoWaitMailboxNoCheck(t *testing.T) {
+	srv := imapserver.StartServer(t)
+	clt := &verifyCountingClient{}
+
+	_, err := NewClient(testClientCfg(t, clt, srv))
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(clt.verified))
 }

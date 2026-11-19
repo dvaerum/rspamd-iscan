@@ -19,6 +19,7 @@ type IMAPClient interface {
 	Monitor(mailbox string) (<-chan *imapclt.EventNewMessages, func() error, error)
 	Move(uids []uint32, mailbox string) error
 	Upload(path, mailbox string, ts time.Time) error
+	VerifyMailbox(mailbox string) error
 }
 
 type Config struct {
