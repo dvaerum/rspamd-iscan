@@ -545,3 +545,179 @@ func TestProcessScanBox_WaitUploadFailsKeepsOriginal(t *testing.T) {
 	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
 	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
 }
+
+// sequenceRspamc returns the given results one per Check call, then the
+// last one again.
+func sequenceRspamc(results ...rspamc.CheckResult) *mock.Rspamc {
+	calls := 0
+
+	return &mock.Rspamc{
+		CheckFn: func(_ context.Context, r io.Reader) (*rspamc.CheckResult, error) {
+			if _, err := io.Copy(io.Discard, r); err != nil {
+				return nil, err
+			}
+
+			res := results[min(calls, len(results)-1)]
+			calls++
+
+			return &res, nil
+		},
+	}
+}
+
+// holdMailInWaitBox puts the suspicious mail through a first scan with score 6
+// so that it lands in the wait mailbox, then lets the next scans return
+// secondRes.
+func holdMailInWaitBox(
+	t *testing.T, srv *imapserver.Server, clt *Client, secondRes rspamc.CheckResult,
+) {
+	t.Helper()
+
+	clt.rspamc = sequenceRspamc(rspamc.CheckResult{Score: 6}, secondRes)
+	uploadTo(t, clt.clt, mail.TestSuspiciousMailPath(t), srv.ScanMailbox)
+	assert.NoError(t, clt.ProcessScanBox())
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+}
+
+func TestProcessWaitBox_YoungMailStays(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 1})
+
+	clock.Advance(testWaitDuration - time.Second)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+}
+
+func TestProcessWaitBox_OldMailToInbox(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 1})
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	inbox := readMailbox(t, clt.clt, srv.InboxMailBox)
+	assert.Equal(t, 1, len(inbox))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrRspamdScore+": 1"))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrFirstScore+": 6"))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+}
+
+func TestProcessWaitBox_OldMailToSpam(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 10})
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	spam := readMailbox(t, clt.clt, srv.SpamMailbox)
+	assert.Equal(t, 1, len(spam))
+	assert.Equal(t, 1, headerCount(spam[0].Raw, hdrFirstScore+": 6"))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+}
+
+func TestProcessWaitBox_NeverWaitsTwice(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 7})
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+}
+
+func TestProcessWaitBox_NoDuplicateHeaders(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{
+		Score:   2,
+		Symbols: map[string]*rspamc.Symbol{"TEST_SYM": {Name: "TEST_SYM", Score: 1.5}},
+	})
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	inbox := readMailbox(t, clt.clt, srv.InboxMailBox)
+	assert.Equal(t, 1, len(inbox))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrFirstScore))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrRspamdScore))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrPrefix+"Symbol-"))
+	assert.Equal(t, 3, headerCount(inbox[0].Raw, hdrPrefix))
+}
+
+func TestProcessWaitBox_SubjectRewrittenOnce(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{
+		Score:   1,
+		Subject: mail.SuspiciousMailRewrittenSubject,
+	})
+
+	held := readMailbox(t, clt.clt, srv.WaitMailbox)
+	assert.Equal(t, mail.SuspiciousMailSubject, held[0].Subject)
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	inbox := readMailbox(t, clt.clt, srv.InboxMailBox)
+	assert.Equal(t, 1, len(inbox))
+	assert.Equal(t, mail.SuspiciousMailRewrittenSubject, inbox[0].Subject)
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, "Subject:"))
+}
+
+func TestProcessWaitBox_MalformedMail(t *testing.T) {
+	srv, clt, _ := newWaitTestClient(t)
+	uploadTo(t, clt.clt, mail.TestMalformedMailPath(t), srv.WaitMailbox)
+
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+}
+
+func TestProcessWaitBox_EmptyWaitBox(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	clock.Advance(24 * time.Hour)
+
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+}
+
+func TestProcessWaitBox_DisabledIsNoop(t *testing.T) {
+	srv, clt := startServerClient(t)
+	uploadTo(t, clt.clt, mail.TestHamMailPath(t), srv.WaitMailbox)
+
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+}
+
+func TestProcessWaitBox_DryRunMovesNothing(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 1})
+
+	dry := imapclt.NewDryClient(&imapclt.Config{
+		Address:       srv.ListenAddr,
+		User:          srv.UserName,
+		Password:      srv.UserPasswd,
+		AllowInsecure: true,
+	})
+	assert.NoError(t, dry.Connect())
+	t.Cleanup(func() { _ = dry.Close() })
+	clt.clt = dry
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+}

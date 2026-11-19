@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	netmail "net/mail"
 	"os"
 	"slices"
 	"strconv"
@@ -82,6 +83,11 @@ type scannedMail struct {
 	// Band is the destination class; bandUnsure mails are unmodified apart
 	// from the first-score header.
 	Band scoreBand
+	// FirstScore is the value of the first-score header, empty if absent.
+	// Only set by the second scan.
+	FirstScore string
+	// HeldFor is how long the mail was in the wait mailbox.
+	HeldFor time.Duration
 }
 
 type learnFn func(context.Context, io.Reader) error
@@ -243,6 +249,23 @@ func addScanResultHeaders(mailFilepath string, result *rspamc.CheckResult) error
 	}
 
 	return mail.AddHeaders(mailFilepath, hdrsData)
+}
+
+// readHeader returns the value of the named header of the mail read from r,
+// or "" if it is absent. r is read from its current position.
+func readHeader(r io.Reader, name string) (string, error) {
+	if f, ok := r.(io.Seeker); ok {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return "", err
+		}
+	}
+
+	m, err := netmail.ReadMessage(r)
+	if err != nil {
+		return "", err
+	}
+
+	return m.Header.Get(name), nil
 }
 
 func addFirstScoreHeader(mailFilepath string, score float32) error {
@@ -432,7 +455,10 @@ func (c *Client) removeTempFile(path string, logger *slog.Logger) {
 	}
 }
 
-func (c *Client) downloadAndScan(msg *imapclt.Message) (*scannedMail, error) {
+// downloadAndScan downloads and scans msg and prepares the local copy for its
+// destination.
+// With final set (second scan of a held mail) the mail is never held again.
+func (c *Client) downloadAndScan(msg *imapclt.Message, final bool) (*scannedMail, error) {
 	tmpFile, err := os.CreateTemp(
 		c.tempDir,
 		"rspamd-iscan-mail-"+strconv.Itoa(int(msg.UID)),
@@ -471,6 +497,15 @@ func (c *Client) downloadAndScan(msg *imapclt.Message) (*scannedMail, error) {
 		"mail.envelope.recipients", env.Recipients,
 	)
 
+	var firstScore string
+	if final {
+		firstScore, err = readHeader(tmpFile, hdrFirstScore)
+		if err != nil {
+			errCleanupfn()
+			return nil, fmt.Errorf("reading %s header failed: %w", hdrFirstScore, err)
+		}
+	}
+
 	_, err = tmpFile.Seek(0, 0)
 	if err != nil {
 		errCleanupfn()
@@ -488,7 +523,12 @@ func (c *Client) downloadAndScan(msg *imapclt.Message) (*scannedMail, error) {
 		return nil, fmt.Errorf("closing file of downloaded mail failed: %w", err)
 	}
 
-	if band := c.classify(scanResult.Score); band == bandUnsure {
+	band := c.classify(scanResult.Score)
+	if final && band == bandUnsure {
+		band = bandHam
+	}
+
+	if band == bandUnsure {
 		// Held mails stay unmodified: the scan headers and the subject
 		// rewrite are added once, after the second scan.
 		if err := addFirstScoreHeader(tmpFile.Name(), scanResult.Score); err != nil {
@@ -541,7 +581,8 @@ func (c *Client) downloadAndScan(msg *imapclt.Message) (*scannedMail, error) {
 		UID:         msg.UID,
 		Envelope:    env,
 		CheckResult: scanResult,
-		Band:        c.classify(scanResult.Score),
+		Band:        band,
+		FirstScore:  firstScore,
 	}, nil
 }
 
@@ -569,7 +610,7 @@ func (c *Client) ProcessScanBox() error {
 			return fmt.Errorf("fetching messages from scanbox failed: %w", err)
 		}
 
-		sm, err := c.downloadAndScan(msg)
+		sm, err := c.downloadAndScan(msg, false)
 		if err != nil {
 			// TODO: abort on local tmpfile errors immediately,
 			// unlikely that the following mail won't encounter the
@@ -599,6 +640,119 @@ func (c *Client) ProcessScanBox() error {
 	c.cntProcessedMails.Add(uint64(len(scannedMails)))
 
 	return errors.Join(errs...)
+}
+
+// ProcessWaitBox scans the mails that have been held in the wait mailbox for
+// at least the wait duration and delivers them to the spam or inbox mailbox.
+// This is the final decision, mails are never held again.
+// It does nothing when no wait mailbox is configured.
+func (c *Client) ProcessWaitBox() error {
+	if c.waitMailbox == "" {
+		return nil
+	}
+
+	var scannedMails []*scannedMail
+	var malformedMailsUIDs []uint32
+	var errs []error
+
+	logger := c.logger.With("mailbox.source", c.waitMailbox)
+	logger.Info("processing wait box")
+
+	now := c.now()
+
+	for msg, err := range c.clt.Messages(c.waitMailbox) {
+		if err != nil {
+			if errMalformed, ok := errors.AsType[*imapclt.ErrMalformedMsg](err); ok {
+				logger.Warn(
+					"email is malformed, skipping scan",
+					"mail.uid", errMalformed.UID,
+					"error", err,
+					"event", "imap.msg_malformed",
+				)
+				malformedMailsUIDs = append(malformedMailsUIDs, errMalformed.UID)
+				continue
+			}
+
+			return fmt.Errorf("fetching messages from waitbox failed: %w", err)
+		}
+
+		heldFor := now.Sub(msg.InternalDate)
+		if heldFor < c.waitDuration {
+			continue
+		}
+
+		sm, err := c.downloadAndScan(msg, true)
+		if err != nil {
+			errs = append(errs, err)
+			break
+		}
+
+		sm.HeldFor = heldFor
+		scannedMails = append(scannedMails, sm)
+	}
+
+	for _, sm := range scannedMails {
+		if err := c.releaseHeldMail(sm); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(malformedMailsUIDs) > 0 {
+		err := c.clt.Move(malformedMailsUIDs, c.inboxMailbox)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("moving malformed mails failed: %w", err))
+		}
+
+		logger.Info("skipped scanning of malformed emails, moved mails to inbox",
+			"count", len(malformedMailsUIDs))
+	}
+
+	return errors.Join(errs...)
+}
+
+// releaseHeldMail uploads the finally scanned mail to its destination and then
+// moves the held copy out of the wait mailbox to the backup mailbox. The upload
+// comes first so a failed upload leaves the held mail for the next round.
+func (c *Client) releaseHeldMail(mail *scannedMail) error {
+	logger := c.logger.With(
+		"mail.subject", mail.Envelope.Subject,
+		"mail.uid", mail.UID,
+	)
+
+	mbox := c.inboxMailbox
+	if mail.Band == bandSpam {
+		mbox = c.spamMailbox
+	}
+
+	err := c.clt.Upload(mail.Path, mbox, mail.Envelope.Date)
+	c.removeTempFile(mail.Path, logger)
+	if err != nil {
+		return fmt.Errorf(
+			"uploading held email %d (%s) to %s failed: %w",
+			mail.UID, mail.Envelope.Subject, mbox, err,
+		)
+	}
+
+	err = c.clt.Move([]uint32{mail.UID}, c.backupMailbox)
+	if err != nil {
+		return fmt.Errorf(
+			"moving held mail (%d) (%s) to backup mailbox %s failed after it was uploaded to %s: %w",
+			mail.UID, mail.Envelope.Subject, c.backupMailbox, mbox, err,
+		)
+	}
+
+	c.cntProcessedMails.Add(1)
+
+	logger.Info(
+		"released held message",
+		"scan.first_score", mail.FirstScore,
+		"scan.final_score", mail.CheckResult.Score,
+		"mailbox.destination", mbox,
+		"wait.held_for", mail.HeldFor.String(),
+		"event", "iscan.wait_decision",
+	)
+
+	return nil
 }
 
 // Monitor monitors the Unscanned mailbox for new messages and processes them
