@@ -499,10 +499,15 @@ func (c *Client) downloadAndScan(msg *imapclt.Message, final bool) (*scannedMail
 
 	var firstScore string
 	if final {
+		// The first score is only logged. A mail whose headers net/mail
+		// rejects must still be released, so a failure is not fatal.
 		firstScore, err = readHeader(tmpFile, hdrFirstScore)
 		if err != nil {
-			errCleanupfn()
-			return nil, fmt.Errorf("reading %s header failed: %w", hdrFirstScore, err)
+			logger.Warn(
+				"reading first-score header failed, continuing without it",
+				"error", err, "header", hdrFirstScore,
+			)
+			firstScore = ""
 		}
 	}
 
@@ -683,8 +688,10 @@ func (c *Client) ProcessWaitBox() error {
 
 		sm, err := c.downloadAndScan(msg, true)
 		if err != nil {
+			// Unlike in the scan box, continue: a mail that keeps failing
+			// must not block the other held mails.
 			errs = append(errs, err)
-			break
+			continue
 		}
 
 		sm.HeldFor = heldFor

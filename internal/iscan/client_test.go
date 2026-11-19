@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"iter"
 	"strings"
 	"testing"
 	"time"
@@ -772,4 +773,73 @@ func TestMonitor_TimerProcessesWaitBox(t *testing.T) {
 
 	assert.NoError(t, clt.Stop())
 	assert.NoError(t, <-runErrChan)
+}
+
+// badHeaderClient serves every message of waitMailbox with a header line
+// without a colon. The in-memory server refuses to store such a mail, real
+// servers do not.
+type badHeaderClient struct {
+	IMAPClient
+	waitMailbox string
+}
+
+func (c *badHeaderClient) Messages(mailbox string) iter.Seq2[*imapclt.Message, error] {
+	return func(yield func(*imapclt.Message, error) bool) {
+		for msg, err := range c.IMAPClient.Messages(mailbox) {
+			if err == nil && mailbox == c.waitMailbox {
+				msg.Message = strings.NewReader(
+					"Subject: bad header mail\r\nthis line has no colon\r\n\r\nbody\r\n",
+				)
+			}
+			if !yield(msg, err) {
+				return
+			}
+		}
+	}
+}
+
+func TestProcessWaitBox_MalformedHeaderLineIsReleased(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 1})
+	clt.clt = &badHeaderClient{IMAPClient: clt.clt, waitMailbox: srv.WaitMailbox}
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+}
+
+// A mail that fails the second scan must not keep the other held mails from
+// being released in the same round.
+func TestProcessWaitBox_BadMailDoesNotBlockOthers(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	uploadDueToWaitBox(t, clt.clt, srv, clock)
+	// uploaded first, so it is processed before the good mail
+	err := clt.clt.Upload(
+		mail.TestSpamMailPath(t), srv.WaitMailbox,
+		clock.Now().Add(-testWaitDuration-time.Hour),
+	)
+	assert.NoError(t, err)
+	uploadDueToWaitBox(t, clt.clt, srv, clock)
+
+	clt.rspamc = &mock.Rspamc{
+		CheckFn: func(_ context.Context, r io.Reader) (*rspamc.CheckResult, error) {
+			buf, err := io.ReadAll(r)
+			if err != nil {
+				return nil, err
+			}
+			if strings.Contains(string(buf), mail.SpamMailSubject) {
+				return nil, errors.New("mock check error")
+			}
+
+			return &rspamc.CheckResult{Score: 1}, nil
+		},
+	}
+
+	assert.Error(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 2, mailboxContainsMailCnt(t, clt.clt, srv.InboxMailBox, mail.HamMailSubject))
+	assert.Equal(t, 1, mailboxContainsMailCnt(t, clt.clt, srv.WaitMailbox, mail.SpamMailSubject))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
 }
