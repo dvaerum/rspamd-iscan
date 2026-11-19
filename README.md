@@ -62,6 +62,8 @@ Your mail-clients would then be configured to use `HAM` as inbox.
   - One to store mails that have been wrongly classified as Spam (`HamMailbox`),
   - One to store unprocessed new mails (`ScanMailbox`),
   - One to store scanned mails classified as HAM (`InboxMailbox`)
+  - Optionally, one to hold mails with an unsure score (`WaitMailbox`, see
+    [Unsure Mails](#unsure-mails-optional))
 
 ### rspamd-iscan
 
@@ -113,6 +115,44 @@ MarkLearnedAsSpamAsRead = true
 # "6h", default: "6h"
 #WaitDuration            = "6h"
 ```
+
+### Unsure Mails (optional)
+
+By default a mail is either Spam (score >= `SpamThreshold`) or Ham. With a
+`WaitMailbox` configured, mails with a score in the grey zone between
+`UnsureThreshold` and `SpamThreshold` are held back and scanned a second time
+after `WaitDuration`. Rspamd's score for the same mail can change over time,
+e.g. once blocklists or the Bayes classifier know the sender or content.
+
+```
+score >= SpamThreshold                      -> SpamMailbox
+UnsureThreshold <= score < SpamThreshold    -> WaitMailbox (held for WaitDuration)
+score < UnsureThreshold                     -> InboxMailbox
+
+after WaitDuration, second scan (final, a mail never waits twice):
+score >= SpamThreshold                      -> SpamMailbox
+otherwise                                   -> InboxMailbox
+```
+
+- The feature is **off by default**; it is enabled by setting `WaitMailbox`.
+  `UnsureThreshold` is then required, `WaitDuration` defaults to `6h`.
+- The `WaitMailbox` must be created manually on the IMAP server and must differ
+  from all other mailboxes. rspamd-iscan checks that it exists at startup and
+  refuses to start otherwise.
+- The held copy is the unmodified original (original subject, no scan result
+  headers) plus one header, `X-rspamd-iscan-First-Score`, with the score of the
+  first scan. The original in `ScanMailbox` is moved to `BackupMailbox` as usual.
+- The age of a held mail is measured from its IMAP internal date, which is set
+  to the time it was put on hold. Held mails are checked at startup and every
+  30 minutes. Mails you delete from the `WaitMailbox` are simply gone.
+- After the second scan the usual scan result headers are added and the subject
+  is rewritten if Rspamd asks for it, exactly once.
+  `X-rspamd-iscan-First-Score` is kept on the delivered mail. The held copy is
+  moved to `BackupMailbox`. One log line (`event=iscan.wait_decision`) per
+  decision records first score, final score, destination and held duration.
+- If Rspamd is unreachable or fails, behavior is unchanged: the error is
+  handled as without this feature, nothing is held or released on a failed
+  scan.
 
 ### Credentials Directory
 
