@@ -800,6 +800,29 @@ func TestProcessWaitBox_SubjectRewrittenOnce(t *testing.T) {
 	assert.Equal(t, 1, headerCount(inbox[0].Raw, "Subject:"))
 }
 
+// A future INTERNALDATE (clock skew, hand-set date) must not hold a mail
+// longer than the wait duration, counted from when the mail was first seen.
+func TestProcessWaitBox_FutureInternalDateReleasedAfterWaitDuration(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	err := clt.clt.Upload(
+		mail.TestHamMailPath(t), srv.WaitMailbox, clock.Now().Add(24*time.Hour),
+	)
+	assert.NoError(t, err)
+
+	assert.NoError(t, clt.ProcessWaitBox())
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+
+	clock.Advance(testWaitDuration - time.Second)
+	assert.NoError(t, clt.ProcessWaitBox())
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+
+	clock.Advance(time.Second)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+}
+
 func TestProcessWaitBox_MalformedMail(t *testing.T) {
 	srv, clt, _ := newWaitTestClient(t)
 	uploadTo(t, clt.clt, mail.TestMalformedMailPath(t), srv.WaitMailbox)

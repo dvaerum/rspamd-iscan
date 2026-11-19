@@ -61,6 +61,11 @@ type Client struct {
 	// tests replace it.
 	now func() time.Time
 
+	// futureDatedSince maps the UID of a held mail with a future INTERNALDATE
+	// to the time it was first seen, see [Client.heldFor]. Only used by
+	// ProcessWaitBox.
+	futureDatedSince map[uint32]time.Time
+
 	tempDir       string
 	keepTempFiles bool
 
@@ -674,6 +679,7 @@ func (c *Client) ProcessWaitBox() error {
 	logger.Info("processing wait box")
 
 	now := c.now()
+	futureDatedSince := map[uint32]time.Time{}
 
 	for msg, err := range c.clt.Messages(c.waitMailbox) {
 		if err != nil {
@@ -691,7 +697,7 @@ func (c *Client) ProcessWaitBox() error {
 			return fmt.Errorf("fetching messages from waitbox failed: %w", err)
 		}
 
-		heldFor := now.Sub(msg.InternalDate)
+		heldFor := c.heldFor(msg, now, futureDatedSince)
 		if heldFor < c.waitDuration {
 			continue
 		}
@@ -707,6 +713,8 @@ func (c *Client) ProcessWaitBox() error {
 		sm.HeldFor = heldFor
 		scannedMails = append(scannedMails, sm)
 	}
+
+	c.futureDatedSince = futureDatedSince
 
 	for _, sm := range scannedMails {
 		if err := c.releaseHeldMail(sm); err != nil {
@@ -725,6 +733,27 @@ func (c *Client) ProcessWaitBox() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// heldFor returns how long msg has been in the wait mailbox. A mail with an
+// INTERNALDATE in the future (clock skew, hand-set date) would otherwise wait
+// until that date, so it is counted from the time it was first seen, which caps
+// its wait at the wait duration. The first-seen times are tracked in memory,
+// a restart only restarts the wait. Mails still future-dated are recorded in
+// seen.
+func (c *Client) heldFor(msg *imapclt.Message, now time.Time, seen map[uint32]time.Time) time.Duration {
+	heldFor := now.Sub(msg.InternalDate)
+	if heldFor >= 0 {
+		return heldFor
+	}
+
+	since, ok := c.futureDatedSince[msg.UID]
+	if !ok {
+		since = now
+	}
+	seen[msg.UID] = since
+
+	return now.Sub(since)
 }
 
 // releaseHeldMail uploads the finally scanned mail to its destination and then
