@@ -36,9 +36,76 @@ type Config struct {
 
 	SpamTreshold float32
 
+	// WaitMailbox enables the unsure/wait band when set. Mails with a score
+	// in [UnsureThreshold, SpamTreshold) are held there for WaitDuration.
+	WaitMailbox     string
+	UnsureThreshold float32
+	// WaitDuration is parsed by time.ParseDuration, empty means
+	// [defaultWaitDuration].
+	WaitDuration string
+
 	Logger     *slog.Logger
 	IMAPClient IMAPClient
 	Rspamc     RspamdClient
+}
+
+const defaultWaitDuration = 6 * time.Hour
+
+// waitDuration returns the parsed WaitDuration or [defaultWaitDuration] if it
+// is empty.
+func (c *Config) waitDuration() (time.Duration, error) {
+	if c.WaitDuration == "" {
+		return defaultWaitDuration, nil
+	}
+
+	d, err := time.ParseDuration(c.WaitDuration)
+	if err != nil {
+		return 0, fmt.Errorf("invalid WaitDuration: %w", err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("WaitDuration (%s) must be >0", c.WaitDuration)
+	}
+
+	return d, nil
+}
+
+func (c *Config) validateWait() error {
+	if c.WaitMailbox == "" {
+		if c.UnsureThreshold != 0 {
+			return errors.New("UnsureThreshold is set but WaitMailbox is empty")
+		}
+		if c.WaitDuration != "" {
+			return errors.New("WaitDuration is set but WaitMailbox is empty")
+		}
+		return nil
+	}
+
+	if c.UnsureThreshold <= 0 {
+		return errors.New("UnsureThreshold must be >0 when WaitMailbox is set")
+	}
+	if c.UnsureThreshold >= c.SpamTreshold {
+		return errors.New("UnsureThreshold must be smaller than SpamThreshold")
+	}
+
+	if _, err := c.waitDuration(); err != nil {
+		return err
+	}
+
+	others := []struct{ name, mailbox string }{
+		{"ScanMailbox", c.ScanMailbox},
+		{"InboxMailbox", c.InboxMailbox},
+		{"SpamMailbox", c.SpamMailboxName},
+		{"BackupMailbox", c.BackupMailbox},
+		{"HamMailbox", c.HamMailbox},
+		{"UndetectedMailbox", c.UndetectedMailboxName},
+	}
+	for _, o := range others {
+		if c.WaitMailbox == o.mailbox {
+			return fmt.Errorf("WaitMailbox and %s must differ", o.name)
+		}
+	}
+
+	return nil
 }
 
 func (c *Config) validate() error {
@@ -70,6 +137,10 @@ func (c *Config) validate() error {
 	// should work fine!
 	if c.SpamTreshold == 0 {
 		return errors.New("SpamThreshold must be >0")
+	}
+
+	if err := c.validateWait(); err != nil {
+		return err
 	}
 
 	fd, err := os.Stat(c.TempDir)
