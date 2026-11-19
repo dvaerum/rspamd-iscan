@@ -393,3 +393,155 @@ func TestClassify(t *testing.T) {
 		})
 	}
 }
+
+// storedMail is a mail read back from a mailbox.
+type storedMail struct {
+	Subject      string
+	Raw          string
+	InternalDate time.Time
+}
+
+func readMailbox(t *testing.T, clt IMAPClient, mailbox string) []storedMail {
+	t.Helper()
+
+	var result []storedMail
+	for msg, err := range clt.Messages(mailbox) {
+		assert.NoError(t, err)
+		raw, err := io.ReadAll(msg.Message)
+		assert.NoError(t, err)
+		result = append(result, storedMail{
+			Subject:      msg.Envelope.Subject,
+			Raw:          string(raw),
+			InternalDate: msg.InternalDate,
+		})
+	}
+
+	return result
+}
+
+// headerCount counts the header lines whose name starts with prefix
+// (case-insensitive) in the header section of raw.
+func headerCount(raw, prefix string) int {
+	hdrs, _, _ := strings.Cut(raw, "\r\n\r\n")
+
+	cnt := 0
+	for line := range strings.SplitSeq(hdrs, "\r\n") {
+		if strings.HasPrefix(strings.ToLower(line), strings.ToLower(prefix)) {
+			cnt++
+		}
+	}
+
+	return cnt
+}
+
+func uploadTo(t *testing.T, clt IMAPClient, path, mailbox string) {
+	t.Helper()
+	assert.NoError(t, clt.Upload(path, mailbox, time.Now()))
+}
+
+func TestProcessScanBox_UnsureGoesToWait(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	uploadTo(t, clt.clt, mail.TestSuspiciousMailPath(t), srv.ScanMailbox)
+
+	assert.NoError(t, clt.ProcessScanBox())
+
+	held := readMailbox(t, clt.clt, srv.WaitMailbox)
+	assert.Equal(t, 1, len(held))
+	// original subject: no rewrite
+	assert.Equal(t, mail.SuspiciousMailSubject, held[0].Subject)
+	// exactly one extra header, no scan result headers
+	assert.Equal(t, 1, headerCount(held[0].Raw, hdrPrefix))
+	assert.Equal(t, 1, headerCount(held[0].Raw, hdrFirstScore+": 6"))
+	assert.Equal(t, 0, headerCount(held[0].Raw, hdrRspamdScore))
+	assert.Equal(t, true, held[0].InternalDate.Equal(clock.Now()))
+
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.ScanMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+
+	backup := readMailbox(t, clt.clt, srv.BackupMailbox)
+	assert.Equal(t, 1, len(backup))
+	assert.Equal(t, 0, headerCount(backup[0].Raw, hdrPrefix))
+}
+
+func TestProcessScanBox_BelowUnsureGoesToInbox(t *testing.T) {
+	srv, clt, _ := newWaitTestClient(t)
+	uploadTo(t, clt.clt, mail.TestHamMailPath(t), srv.ScanMailbox)
+
+	assert.NoError(t, clt.ProcessScanBox())
+
+	inbox := readMailbox(t, clt.clt, srv.InboxMailBox)
+	assert.Equal(t, 1, len(inbox))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrRspamdScore))
+	assert.Equal(t, 0, headerCount(inbox[0].Raw, hdrFirstScore))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+}
+
+func TestProcessScanBox_SpamUnaffected(t *testing.T) {
+	srv, clt, _ := newWaitTestClient(t)
+	uploadTo(t, clt.clt, mail.TestSpamMailPath(t), srv.ScanMailbox)
+
+	assert.NoError(t, clt.ProcessScanBox())
+
+	spam := readMailbox(t, clt.clt, srv.SpamMailbox)
+	assert.Equal(t, 1, len(spam))
+	assert.Equal(t, 1, headerCount(spam[0].Raw, hdrRspamdScore))
+	assert.Equal(t, 0, headerCount(spam[0].Raw, hdrFirstScore))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+}
+
+// With WaitMailbox unset a mid-score mail takes today's path: subject
+// rewritten, scan headers added, delivered to the inbox.
+func TestProcessScanBox_WaitDisabledIsUnchanged(t *testing.T) {
+	srv, clt := startServerClient(t)
+	uploadTo(t, clt.clt, mail.TestSuspiciousMailPath(t), srv.ScanMailbox)
+
+	assert.NoError(t, clt.ProcessScanBox())
+
+	inbox := readMailbox(t, clt.clt, srv.InboxMailBox)
+	assert.Equal(t, 1, len(inbox))
+	assert.Equal(t, mail.SuspiciousMailRewrittenSubject, inbox[0].Subject)
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrRspamdScore))
+	assert.Equal(t, 0, headerCount(inbox[0].Raw, hdrFirstScore))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.ScanMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+}
+
+// failingUploadClient fails uploads to failMailbox while failing is set.
+type failingUploadClient struct {
+	IMAPClient
+	failMailbox string
+	failing     bool
+}
+
+func (c *failingUploadClient) Upload(path, mailbox string, ts time.Time) error {
+	if c.failing && mailbox == c.failMailbox {
+		return errors.New("mock upload error")
+	}
+
+	return c.IMAPClient.Upload(path, mailbox, ts)
+}
+
+func TestProcessScanBox_WaitUploadFailsKeepsOriginal(t *testing.T) {
+	srv, clt, _ := newWaitTestClient(t)
+	failing := &failingUploadClient{
+		IMAPClient: clt.clt, failMailbox: srv.WaitMailbox, failing: true,
+	}
+	clt.clt = failing
+	uploadTo(t, failing.IMAPClient, mail.TestSuspiciousMailPath(t), srv.ScanMailbox)
+
+	assert.Error(t, clt.ProcessScanBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.ScanMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.BackupMailbox))
+
+	// the next round retries
+	failing.failing = false
+	assert.NoError(t, clt.ProcessScanBox())
+
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.ScanMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+}

@@ -23,6 +23,9 @@ import (
 const (
 	hdrPrefix      = "X-rspamd-iscan-"
 	hdrRspamdScore = hdrPrefix + "Score"
+	// hdrFirstScore carries the score of the first scan on mails held in the
+	// wait mailbox, so the second scan knows it.
+	hdrFirstScore = hdrPrefix + "First-Score"
 )
 
 type RspamdClient interface {
@@ -76,6 +79,9 @@ type scannedMail struct {
 	UID         uint32
 	Envelope    *imapclt.Envelope
 	CheckResult *rspamc.CheckResult
+	// Band is the destination class; bandUnsure mails are unmodified apart
+	// from the first-score header.
+	Band scoreBand
 }
 
 type learnFn func(context.Context, io.Reader) error
@@ -239,6 +245,17 @@ func addScanResultHeaders(mailFilepath string, result *rspamc.CheckResult) error
 	return mail.AddHeaders(mailFilepath, hdrsData)
 }
 
+func addFirstScoreHeader(mailFilepath string, score float32) error {
+	hdr, err := mail.AsHeaders([]*mail.Header{
+		{Name: hdrFirstScore, Body: fmt.Sprint(score)},
+	})
+	if err != nil {
+		return err
+	}
+
+	return mail.AddHeaders(mailFilepath, hdr)
+}
+
 func sortHeaders(hdrs []*mail.Header) {
 	slices.SortFunc(hdrs, func(a, b *mail.Header) int {
 		if a.Name == hdrRspamdScore {
@@ -300,6 +317,14 @@ func (c *Client) replaceWithModifiedMails(mails []*scannedMail) error {
 			"mail.uid", mail.UID,
 		)
 
+		if mail.Band == bandUnsure {
+			if err := c.holdMail(mail, logger); err != nil {
+				errs = append(errs, err)
+			}
+
+			continue
+		}
+
 		// TODO: support deleting emails from the mailbox, when backupMailbox is
 		// empty instead of keeping a copy of the original, deleting
 		// must happen after appendMail!
@@ -353,6 +378,58 @@ func (c *Client) replaceWithModifiedMails(mails []*scannedMail) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// holdMail uploads the unmodified copy of an unsure mail to the wait mailbox
+// and moves the original to the backup mailbox. The upload comes first so that
+// a failed upload leaves the original in the scan mailbox, to be retried in the
+// next round.
+func (c *Client) holdMail(mail *scannedMail, logger *slog.Logger) error {
+	// INTERNALDATE is the time the mail was put on hold, the age check of
+	// the second scan relies on it.
+	err := c.clt.Upload(mail.Path, c.waitMailbox, c.now())
+	if err != nil {
+		c.removeTempFile(mail.Path, logger)
+
+		return fmt.Errorf(
+			"uploading email %d (%s) to wait mailbox %s failed: %w",
+			mail.UID, mail.Envelope.Subject, c.waitMailbox, err,
+		)
+	}
+
+	c.removeTempFile(mail.Path, logger)
+
+	err = c.clt.Move([]uint32{mail.UID}, c.backupMailbox)
+	if err != nil {
+		return fmt.Errorf(
+			"moving mail (%d) (%s) to backup mailbox %s failed after it was uploaded to the wait mailbox: %w",
+			mail.UID, mail.Envelope.Subject, c.backupMailbox, err,
+		)
+	}
+
+	logger.Info(
+		"held message in wait mailbox, moved original to backup mailbox",
+		"scan.score", mail.CheckResult.Score,
+		"mailbox.wait", c.waitMailbox,
+		"event", "iscan.msg_held",
+	)
+
+	return nil
+}
+
+func (c *Client) removeTempFile(path string, logger *slog.Logger) {
+	if c.keepTempFiles {
+		return
+	}
+
+	if err := os.Remove(path); err != nil {
+		logger.Warn(
+			"deleting email file failed",
+			"error", err,
+			"event", "imap.msg_delete_failed",
+			"filepath", path,
+		)
+	}
 }
 
 func (c *Client) downloadAndScan(msg *imapclt.Message) (*scannedMail, error) {
@@ -411,6 +488,28 @@ func (c *Client) downloadAndScan(msg *imapclt.Message) (*scannedMail, error) {
 		return nil, fmt.Errorf("closing file of downloaded mail failed: %w", err)
 	}
 
+	if band := c.classify(scanResult.Score); band == bandUnsure {
+		// Held mails stay unmodified: the scan headers and the subject
+		// rewrite are added once, after the second scan.
+		if err := addFirstScoreHeader(tmpFile.Name(), scanResult.Score); err != nil {
+			return nil, fmt.Errorf("adding first-score header to local mail copy failed: %w", err)
+		}
+
+		logger.Info(
+			"message scanned, score is in the unsure band",
+			"scan.score", scanResult.Score, "scan.is_spam", false,
+			"scan.band", "unsure",
+		)
+
+		return &scannedMail{
+			Path:        tmpFile.Name(),
+			UID:         msg.UID,
+			Envelope:    env,
+			CheckResult: scanResult,
+			Band:        bandUnsure,
+		}, nil
+	}
+
 	if scanResult.Subject != "" && scanResult.Subject != env.Subject {
 		err := mail.ReplaceHeader(
 			tmpFile.Name(),
@@ -442,6 +541,7 @@ func (c *Client) downloadAndScan(msg *imapclt.Message) (*scannedMail, error) {
 		UID:         msg.UID,
 		Envelope:    env,
 		CheckResult: scanResult,
+		Band:        c.classify(scanResult.Score),
 	}, nil
 }
 
