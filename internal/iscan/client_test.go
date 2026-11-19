@@ -286,8 +286,40 @@ func TestNewClient_WaitMailboxChecked(t *testing.T) {
 
 	_, err := NewClient(cfg)
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(clt.verified))
+	assert.Equal(t, 2, len(clt.verified))
 	assert.Equal(t, srv.WaitMailbox, clt.verified[0])
+	assert.Equal(t, srv.BackupMailbox, clt.verified[1])
+}
+
+// Held mails are moved to the backup mailbox, a missing one would make every
+// hold a duplicate, see TestProcessScanBox_WaitBackupMoveFails.
+func TestNewClient_WaitEnabledBackupMailboxMissing(t *testing.T) {
+	srv := imapserver.StartServer(t)
+	imapClt := connectTestIMAPClient(t, srv)
+
+	cfg := testClientCfg(t, imapClt, srv)
+	cfg.WaitMailbox = srv.WaitMailbox
+	cfg.UnsureThreshold = 5
+	cfg.BackupMailbox = "no-such-backup-mailbox"
+
+	_, err := NewClient(cfg)
+	assert.Error(t, err)
+	if !strings.Contains(err.Error(), "no-such-backup-mailbox") {
+		t.Errorf("error %q does not name the backup mailbox", err)
+	}
+}
+
+// With the wait band off the startup checks stay as upstream: a missing
+// backup mailbox is not detected by NewClient.
+func TestNewClient_WaitDisabledBackupMailboxNotChecked(t *testing.T) {
+	srv := imapserver.StartServer(t)
+	imapClt := connectTestIMAPClient(t, srv)
+
+	cfg := testClientCfg(t, imapClt, srv)
+	cfg.BackupMailbox = "no-such-backup-mailbox"
+
+	_, err := NewClient(cfg)
+	assert.NoError(t, err)
 }
 
 func TestNewClient_NoWaitMailboxNoCheck(t *testing.T) {
@@ -544,6 +576,47 @@ func TestProcessScanBox_WaitUploadFailsKeepsOriginal(t *testing.T) {
 
 	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.ScanMailbox))
 	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+}
+
+// failingMoveClient fails moves to failMailbox while failing is set.
+type failingMoveClient struct {
+	IMAPClient
+	failMailbox string
+	failing     bool
+}
+
+func (c *failingMoveClient) Move(uids []uint32, mailbox string) error {
+	if c.failing && mailbox == c.failMailbox {
+		return errors.New("mock move error")
+	}
+
+	return c.IMAPClient.Move(uids, mailbox)
+}
+
+// Documents the at-least-once behaviour: the wait copy is uploaded before the
+// original is moved to the backup mailbox, so a failing move leaves the
+// original in the scan mailbox and the next round holds it again.
+func TestProcessScanBox_WaitBackupMoveFails(t *testing.T) {
+	srv, clt, _ := newWaitTestClient(t)
+	failing := &failingMoveClient{
+		IMAPClient: clt.clt, failMailbox: srv.BackupMailbox, failing: true,
+	}
+	clt.clt = failing
+	uploadTo(t, failing.IMAPClient, mail.TestSuspiciousMailPath(t), srv.ScanMailbox)
+
+	assert.Error(t, clt.ProcessScanBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.ScanMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.BackupMailbox))
+
+	// next round: the original is held a second time
+	failing.failing = false
+	assert.NoError(t, clt.ProcessScanBox())
+
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.ScanMailbox))
+	assert.Equal(t, 2, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
 	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
 }
 

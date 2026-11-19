@@ -103,6 +103,16 @@ func NewClient(cfg *Config) (*Client, error) {
 		if err := cfg.IMAPClient.VerifyMailbox(cfg.WaitMailbox); err != nil {
 			return nil, fmt.Errorf("WaitMailbox %q: %w", cfg.WaitMailbox, err)
 		}
+
+		// A failing backup move after the upload to the wait mailbox
+		// leaves the original in the scan mailbox, so it would be held
+		// again every round.
+		if err := cfg.IMAPClient.VerifyMailbox(cfg.BackupMailbox); err != nil {
+			return nil, fmt.Errorf(
+				"BackupMailbox %q (required when WaitMailbox is set): %w",
+				cfg.BackupMailbox, err,
+			)
+		}
 	}
 
 	waitDuration, err := cfg.waitDuration()
