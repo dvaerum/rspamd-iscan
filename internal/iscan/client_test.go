@@ -679,6 +679,8 @@ func TestProcessWaitBox_OldMailToInbox(t *testing.T) {
 	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrFirstScore+": 6"))
 	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
 	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+	// original from the hold and the held copy
+	assert.Equal(t, 2, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
 }
 
 func TestProcessWaitBox_OldMailToSpam(t *testing.T) {
@@ -693,6 +695,61 @@ func TestProcessWaitBox_OldMailToSpam(t *testing.T) {
 	assert.Equal(t, 1, headerCount(spam[0].Raw, hdrFirstScore+": 6"))
 	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
 	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+	// original from the hold and the held copy
+	assert.Equal(t, 2, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+}
+
+// A failed upload on release leaves the held copy in the wait mailbox and
+// delivers nothing, the next round retries.
+func TestProcessWaitBox_ReleaseUploadFailsKeepsHeldMail(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 1})
+	failing := &failingUploadClient{
+		IMAPClient: clt.clt, failMailbox: srv.InboxMailBox, failing: true,
+	}
+	clt.clt = failing
+
+	clock.Advance(testWaitDuration)
+	assert.Error(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+
+	failing.failing = false
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, 2, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+}
+
+// Documents the at-least-once behaviour: the mail is delivered before the held
+// copy is moved to the backup mailbox, so a failing move leaves the held copy
+// in place and the next round delivers the mail a second time.
+func TestProcessWaitBox_ReleaseBackupMoveFails(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 1})
+	failing := &failingMoveClient{
+		IMAPClient: clt.clt, failMailbox: srv.BackupMailbox, failing: true,
+	}
+	clt.clt = failing
+
+	clock.Advance(testWaitDuration)
+	assert.Error(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+
+	// next round: delivered a second time
+	failing.failing = false
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, 2, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, 2, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
 }
 
 func TestProcessWaitBox_NeverWaitsTwice(t *testing.T) {
