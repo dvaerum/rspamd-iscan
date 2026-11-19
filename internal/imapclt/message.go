@@ -16,6 +16,9 @@ type Message struct {
 	UID      uint32
 	Message  io.Reader
 	Envelope Envelope
+	// InternalDate is the IMAP INTERNALDATE: the time the server received the
+	// message, or the time passed to Upload.
+	InternalDate time.Time
 }
 
 type Envelope struct {
@@ -55,9 +58,10 @@ func (c *Client) Messages(mailbox string) iter.Seq2[*Message, error] {
 		n.AddRange(1, 0)
 
 		fetchCmd := c.clt.Fetch(n, &imap.FetchOptions{
-			Envelope:    true,
-			UID:         true,
-			BodySection: []*imap.FetchItemBodySection{{Peek: true}},
+			Envelope:     true,
+			UID:          true,
+			InternalDate: true,
+			BodySection:  []*imap.FetchItemBodySection{{Peek: true}},
 		})
 
 		for {
@@ -111,7 +115,8 @@ func (c *Client) fetchNext(fetchCmd *imapclient.FetchCommand) (*Message, error) 
 	}
 
 	return &Message{
-		UID: uint32(msg.UID),
+		UID:          uint32(msg.UID),
+		InternalDate: msg.InternalDate,
 		// TODO: Can we stream the body instead of
 		// storing it in memory?
 		Message: bytes.NewReader(body),
