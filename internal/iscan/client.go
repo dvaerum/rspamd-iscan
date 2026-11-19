@@ -262,6 +262,28 @@ func (c *Client) isSpam(r *rspamc.CheckResult) bool {
 	return r.Score >= c.spamTreshold
 }
 
+// scoreBand is the destination class of a scanned mail.
+type scoreBand int
+
+const (
+	bandHam scoreBand = iota
+	bandUnsure
+	bandSpam
+)
+
+// classify maps a score to its band. Without a wait mailbox no mail is ever
+// unsure.
+func (c *Client) classify(score float32) scoreBand {
+	switch {
+	case score >= c.spamTreshold:
+		return bandSpam
+	case c.waitMailbox != "" && score >= c.unsureThreshold:
+		return bandUnsure
+	default:
+		return bandHam
+	}
+}
+
 // replaceWithModifiedMails uploads mails to the spam or inbox mailbox, depending on their
 // spam score.
 // The original email is moved to the backup mailbox.

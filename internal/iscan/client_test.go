@@ -360,3 +360,36 @@ func TestNewClient_WaitDurationDefault(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, defaultWaitDuration, clt.waitDuration)
 }
+
+func TestClassify(t *testing.T) {
+	tests := []struct {
+		name        string
+		waitMailbox string
+		score       float32
+		want        scoreBand
+	}{
+		{"ham below unsure", "wait", 4.99, bandHam},
+		{"zero", "wait", 0, bandHam},
+		{"negative", "wait", -3, bandHam},
+		{"unsure boundary goes to wait", "wait", 5, bandUnsure},
+		{"inside unsure band", "wait", 7.5, bandUnsure},
+		{"just below spam", "wait", 9.99, bandUnsure},
+		{"spam boundary goes to spam", "wait", 10, bandSpam},
+		{"above spam", "wait", 100, bandSpam},
+		{"feature off, in would-be band", "", 7.5, bandHam},
+		{"feature off, unsure boundary", "", 5, bandHam},
+		{"feature off, below spam", "", 9.99, bandHam},
+		{"feature off, spam boundary", "", 10, bandSpam},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Client{
+				waitMailbox:     tt.waitMailbox,
+				unsureThreshold: 5,
+				spamTreshold:    10,
+			}
+			assert.Equal(t, tt.want, c.classify(tt.score))
+		})
+	}
+}
