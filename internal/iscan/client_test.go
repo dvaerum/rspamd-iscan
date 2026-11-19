@@ -823,6 +823,64 @@ func TestProcessWaitBox_FutureInternalDateReleasedAfterWaitDuration(t *testing.T
 	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.InboxMailBox))
 }
 
+// A mail dragged into the wait mailbox by hand has no first-score header. It is
+// released once and routed by the second score.
+func TestProcessWaitBox_NoFirstScoreHeader(t *testing.T) {
+	tests := []struct {
+		name  string
+		score float32
+	}{
+		{"low score to inbox", 1},
+		{"unsure score to inbox", 7},
+		{"spam score to spam", 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, clt, clock := newWaitTestClient(t)
+			uploadDueToWaitBox(t, clt.clt, srv, clock)
+			clt.rspamc = sequenceRspamc(rspamc.CheckResult{Score: tt.score})
+
+			assert.NoError(t, clt.ProcessWaitBox())
+
+			dest, other := srv.InboxMailBox, srv.SpamMailbox
+			if tt.score >= 10 {
+				dest, other = other, dest
+			}
+
+			released := readMailbox(t, clt.clt, dest)
+			assert.Equal(t, 1, len(released))
+			assert.Equal(t, 0, headerCount(released[0].Raw, hdrFirstScore))
+			assert.Equal(t, 1, headerCount(released[0].Raw, hdrRspamdScore))
+			assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, other))
+			assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.WaitMailbox))
+			assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.BackupMailbox))
+		})
+	}
+}
+
+// Documents the v1 behaviour: when the Check call of the second scan fails the
+// error is returned and the held mail stays in the wait mailbox, to be retried
+// in the next round. (The production rspamc client reports an unreachable
+// rspamd as a result with score 0 instead, so those mails are released like
+// any other failed scan.)
+func TestProcessWaitBox_CheckErrorKeepsHeldMail(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	holdMailInWaitBox(t, srv, clt, rspamc.CheckResult{Score: 1})
+	clt.rspamc = &mock.Rspamc{
+		CheckFn: func(context.Context, io.Reader) (*rspamc.CheckResult, error) {
+			return nil, errors.New("mock check error")
+		},
+	}
+
+	clock.Advance(testWaitDuration)
+	assert.Error(t, clt.ProcessWaitBox())
+
+	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.InboxMailBox))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+}
+
 func TestProcessWaitBox_MalformedMail(t *testing.T) {
 	srv, clt, _ := newWaitTestClient(t)
 	uploadTo(t, clt.clt, mail.TestMalformedMailPath(t), srv.WaitMailbox)

@@ -137,8 +137,8 @@ otherwise                                   -> InboxMailbox
 - The feature is **off by default**; it is enabled by setting `WaitMailbox`.
   `UnsureThreshold` is then required, `WaitDuration` defaults to `6h`.
 - The `WaitMailbox` must be created manually on the IMAP server and must differ
-  from all other mailboxes. rspamd-iscan checks that it exists at startup and
-  refuses to start otherwise.
+  from all other mailboxes. rspamd-iscan checks that it and the `BackupMailbox`
+  exist at startup and refuses to start otherwise.
 - The held copy is the unmodified original (original subject, no scan result
   headers) plus one header, `X-rspamd-iscan-First-Score`, with the score of the
   first scan. The original in `ScanMailbox` is moved to `BackupMailbox` as usual.
@@ -152,7 +152,9 @@ otherwise                                   -> InboxMailbox
   decision records first score, final score, destination and held duration.
 - If Rspamd is unreachable or fails, behavior is unchanged: the error is
   handled as without this feature, nothing is held or released on a failed
-  scan.
+  scan. If Rspamd is unreachable during the second scan, held mails are treated
+  like any other failed scan (released with score 0), so monitor Rspamd's
+  availability.
 
 ### Credentials Directory
 
