@@ -412,7 +412,10 @@ func (c *Client) replaceWithModifiedMails(mails []*scannedMail) error {
 			)
 		}
 
-		logger.Info("moved message to backup mailbox and uploaded modified message with scan results to inbox")
+		logger.Info(
+			"moved message to backup mailbox and uploaded modified message with scan results to inbox",
+			"mailbox.destination", mbox,
+		)
 	}
 
 	return errors.Join(errs...)

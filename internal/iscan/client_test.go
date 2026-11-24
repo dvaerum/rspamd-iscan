@@ -1,10 +1,13 @@
 package iscan
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"iter"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -1053,4 +1056,59 @@ func TestProcessWaitBox_BadMailDoesNotBlockOthers(t *testing.T) {
 	assert.Equal(t, 2, mailboxContainsMailCnt(t, clt.clt, srv.InboxMailBox, mail.HamMailSubject))
 	assert.Equal(t, 1, mailboxContainsMailCnt(t, clt.clt, srv.WaitMailbox, mail.SpamMailSubject))
 	assert.Equal(t, 1, countMessagesInMailbox(t, clt.clt, srv.WaitMailbox))
+}
+
+// captureLogs replaces the logger of clt with one that records its output as
+// JSON lines and returns the buffer.
+func captureLogs(clt *Client) *bytes.Buffer {
+	buf := &bytes.Buffer{}
+	clt.logger = slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	return buf
+}
+
+// logRecordsWithMsg returns the JSON log records whose message is msg.
+func logRecordsWithMsg(t *testing.T, logs *bytes.Buffer, msg string) []map[string]any {
+	t.Helper()
+
+	var result []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		rec := map[string]any{}
+		assert.NoError(t, json.Unmarshal([]byte(line), &rec))
+		if rec["msg"] == msg {
+			result = append(result, rec)
+		}
+	}
+
+	return result
+}
+
+const msgMovedAndUploaded = "moved message to backup mailbox and uploaded modified message with scan results to inbox"
+
+func TestProcessScanBox_MovedLogNamesDestinationMailbox(t *testing.T) {
+	tests := []struct {
+		name     string
+		mailPath func(*testing.T) string
+		dest     func(*imapserver.Server) string
+	}{
+		{"spam", mail.TestSpamMailPath, func(s *imapserver.Server) string { return s.SpamMailbox }},
+		{"ham", mail.TestHamMailPath, func(s *imapserver.Server) string { return s.InboxMailBox }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, clt := startServerClient(t)
+			logs := captureLogs(clt)
+			uploadTo(t, clt.clt, tc.mailPath(t), srv.ScanMailbox)
+
+			assert.NoError(t, clt.ProcessScanBox())
+
+			recs := logRecordsWithMsg(t, logs, msgMovedAndUploaded)
+			assert.Equal(t, 1, len(recs))
+			assert.Equal[any](t, tc.dest(srv), recs[0]["mailbox.destination"])
+		})
+	}
 }
