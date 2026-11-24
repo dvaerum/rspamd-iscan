@@ -8,6 +8,8 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1111,4 +1113,56 @@ func TestProcessScanBox_MovedLogNamesDestinationMailbox(t *testing.T) {
 			assert.Equal[any](t, tc.dest(srv), recs[0]["mailbox.destination"])
 		})
 	}
+}
+
+// spoofedFirstScoreMail writes the suspicious test mail with an incoming
+// First-Score header on top and returns its path.
+func spoofedFirstScoreMail(t *testing.T, value string) string {
+	t.Helper()
+
+	orig, err := os.ReadFile(mail.TestSuspiciousMailPath(t))
+	assert.NoError(t, err)
+
+	path := filepath.Join(t.TempDir(), "spoofed.eml")
+	data := append([]byte(hdrFirstScore+": "+value+"\r\n"), orig...)
+	assert.NoError(t, os.WriteFile(path, data, 0o600))
+
+	return path
+}
+
+// A First-Score header that comes with the mail is replaced by the one of our
+// first scan, it neither stays next to it nor reaches the log or the routing.
+func TestProcessScanBox_HeldMailReplacesIncomingFirstScoreHeader(t *testing.T) {
+	srv, clt, _ := newWaitTestClient(t)
+	clt.rspamc = sequenceRspamc(rspamc.CheckResult{Score: 6})
+	uploadTo(t, clt.clt, spoofedFirstScoreMail(t, "99"), srv.ScanMailbox)
+
+	assert.NoError(t, clt.ProcessScanBox())
+
+	held := readMailbox(t, clt.clt, srv.WaitMailbox)
+	assert.Equal(t, 1, len(held))
+	assert.Equal(t, 1, headerCount(held[0].Raw, hdrFirstScore))
+	assert.Equal(t, 1, headerCount(held[0].Raw, hdrFirstScore+": 6"))
+}
+
+func TestProcessWaitBox_IncomingFirstScoreHeaderIsNotUsed(t *testing.T) {
+	srv, clt, clock := newWaitTestClient(t)
+	logs := captureLogs(clt)
+	clt.rspamc = sequenceRspamc(rspamc.CheckResult{Score: 6}, rspamc.CheckResult{Score: 1})
+	uploadTo(t, clt.clt, spoofedFirstScoreMail(t, "99"), srv.ScanMailbox)
+	assert.NoError(t, clt.ProcessScanBox())
+
+	clock.Advance(testWaitDuration)
+	assert.NoError(t, clt.ProcessWaitBox())
+
+	// routing follows the second scan (1), not the spoofed 99
+	inbox := readMailbox(t, clt.clt, srv.InboxMailBox)
+	assert.Equal(t, 1, len(inbox))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrFirstScore))
+	assert.Equal(t, 1, headerCount(inbox[0].Raw, hdrFirstScore+": 6"))
+	assert.Equal(t, true, mailboxIsEmpty(t, clt.clt, srv.SpamMailbox))
+
+	recs := logRecordsWithMsg(t, logs, "released held message")
+	assert.Equal(t, 1, len(recs))
+	assert.Equal[any](t, "6", recs[0]["scan.first_score"])
 }

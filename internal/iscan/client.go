@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	netmail "net/mail"
+	"net/textproto"
 	"os"
 	"slices"
 	"strconv"
@@ -283,15 +284,48 @@ func readHeader(r io.Reader, name string) (string, error) {
 	return m.Header.Get(name), nil
 }
 
-func addFirstScoreHeader(mailFilepath string, score float32) error {
-	hdr, err := mail.AsHeaders([]*mail.Header{
-		{Name: hdrFirstScore, Body: fmt.Sprint(score)},
-	})
+// setFirstScoreHeader writes the first-score header to the mail at
+// mailFilepath. A header that came with the mail is replaced, so a held mail
+// never carries two of them and a sender-supplied value never survives.
+func setFirstScoreHeader(mailFilepath string, score float32) error {
+	hdr := mail.Header{Name: hdrFirstScore, Body: fmt.Sprint(score)}
+
+	present, err := hasHeader(mailFilepath, hdrFirstScore)
+	if err != nil {
+		// A mail whose headers net/mail rejects can not be inspected, the
+		// header is added as before. Held mails are read by the second
+		// scan with the same tolerance.
+		present = false
+	}
+
+	if present {
+		return mail.ReplaceHeader(mailFilepath, hdr)
+	}
+
+	hdrs, err := mail.AsHeaders([]*mail.Header{&hdr})
 	if err != nil {
 		return err
 	}
 
-	return mail.AddHeaders(mailFilepath, hdr)
+	return mail.AddHeaders(mailFilepath, hdrs)
+}
+
+// hasHeader reports whether the mail at path has a header called name.
+func hasHeader(path, name string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	m, err := netmail.ReadMessage(f)
+	if err != nil {
+		return false, err
+	}
+
+	_, ok := m.Header[textproto.CanonicalMIMEHeaderKey(name)]
+
+	return ok, nil
 }
 
 func sortHeaders(hdrs []*mail.Header) {
@@ -554,7 +588,7 @@ func (c *Client) downloadAndScan(msg *imapclt.Message, final bool) (*scannedMail
 	if band == bandUnsure {
 		// Held mails stay unmodified: the scan headers and the subject
 		// rewrite are added once, after the second scan.
-		if err := addFirstScoreHeader(tmpFile.Name(), scanResult.Score); err != nil {
+		if err := setFirstScoreHeader(tmpFile.Name(), scanResult.Score); err != nil {
 			return nil, fmt.Errorf("adding first-score header to local mail copy failed: %w", err)
 		}
 
