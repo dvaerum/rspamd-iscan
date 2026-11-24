@@ -122,3 +122,43 @@ func TestString_WaitOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestString_WaitDurationDefaultIsShown(t *testing.T) {
+	cfg := New()
+	cfg.WaitMailbox = "Wait"
+	cfg.UnsureThreshold = 4.5
+	out := cfg.String()
+
+	if !strings.Contains(out, "6h0m0s (default)") {
+		t.Errorf("String() does not show the default on the Wait Duration line:\n%s", out)
+	}
+	if !strings.Contains(out, "scanned again after 6h0m0s.") {
+		t.Errorf("String() sentence does not show the effective duration:\n%s", out)
+	}
+	if strings.Contains(out, "after .") {
+		t.Errorf("String() sentence has an empty duration:\n%s", out)
+	}
+}
+
+func TestString_WaitDurationExplicitIsShownAsGiven(t *testing.T) {
+	cfg := New()
+	cfg.WaitMailbox = "Wait"
+	cfg.UnsureThreshold = 4.5
+	cfg.WaitDuration = "1h"
+	out := cfg.String()
+
+	if !strings.Contains(out, "scanned again after 1h.") {
+		t.Errorf("String() sentence does not show the explicit duration:\n%s", out)
+	}
+	if strings.Contains(out, "(default)") || strings.Contains(out, "6h0m0s") {
+		t.Errorf("String() shows the default although a duration is set:\n%s", out)
+	}
+}
+
+func TestString_WaitDisabledShowsNoWaitDuration(t *testing.T) {
+	out := New().String()
+
+	if strings.Contains(out, "6h0m0s") || strings.Contains(out, "Wait") {
+		t.Errorf("String() mentions the wait band while it is disabled:\n%s", out)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fho/rspamd-iscan/internal/config"
 	"github.com/fho/rspamd-iscan/internal/imapclt"
 )
 
@@ -52,7 +53,7 @@ type Config struct {
 	Rspamc     RspamdClient
 }
 
-const defaultWaitDuration = 6 * time.Hour
+const defaultWaitDuration = config.DefaultWaitDuration
 
 // waitDuration returns the parsed WaitDuration or [defaultWaitDuration] if it
 // is empty.

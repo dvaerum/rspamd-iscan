@@ -5,9 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
+
+// DefaultWaitDuration is the wait duration used when WaitDuration is empty.
+// It is the single source for the iscan package and the startup banner.
+const DefaultWaitDuration = 6 * time.Hour
 
 type Config struct {
 	RspamdURL               string
@@ -83,7 +88,11 @@ func (c *Config) String() string {
 	if c.WaitMailbox != "" {
 		printKv("Wait Mailbox", c.WaitMailbox)
 		printKv("Unsure Threshold", c.UnsureThreshold)
-		printKv("Wait Duration", c.WaitDuration)
+		if c.WaitDuration == "" {
+			printKv("Wait Duration", DefaultWaitDuration.String()+" (default)")
+		} else {
+			printKv("Wait Duration", c.WaitDuration)
+		}
 	}
 
 	printKv("Temporary Directory", c.TempDir)
@@ -99,8 +108,12 @@ func (c *Config) String() string {
 		fmt.Fprintf(&sb, "Mails in %q are learned as Spam and moved to %q.\n", c.UndetectedMailbox, c.SpamMailbox)
 	}
 	if c.WaitMailbox != "" {
+		waitDuration := c.WaitDuration
+		if waitDuration == "" {
+			waitDuration = DefaultWaitDuration.String()
+		}
 		fmt.Fprintf(&sb, "Mails with a spam score of >=%f and <%f are moved to %q and scanned again after %s.\n",
-			c.UnsureThreshold, c.SpamThreshold, c.WaitMailbox, c.WaitDuration)
+			c.UnsureThreshold, c.SpamThreshold, c.WaitMailbox, waitDuration)
 	}
 	fmt.Fprintf(&sb, "Mails in %q are learned as Ham and moved to %q.\n", c.HamMailbox, c.InboxMailbox)
 
